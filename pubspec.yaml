@@ -24,7 +24,7 @@ dependencies:
   flutter:
     sdk: flutter
   graphql_flutter: ^5.1.2
-  freezed_annotation: ^2.4.1
+  freezed_annotation: ">=2.4.1 <4.0.0"
   json_annotation: ^4.8.1
   json_serializable: ^6.7.1
   shared_preferences: ^2.0.20

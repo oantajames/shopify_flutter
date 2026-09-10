@@ -14,7 +14,7 @@ abstract class ShopifyCustomerAccountTokenStore {
   Future<void> clear(String key);
 }
 
-/// Default store, mirrors how [ShopifyAuth] persists the Storefront token.
+/// Default store, mirrors how `ShopifyAuth` persists the Storefront token.
 class SharedPreferencesCustomerAccountTokenStore
     implements ShopifyCustomerAccountTokenStore {
   /// Creates a store backed by [SharedPreferences].

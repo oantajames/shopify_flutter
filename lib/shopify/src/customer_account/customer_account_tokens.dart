@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'customer_account_exception.dart';
+
 /// Tokens issued by the Customer Account API token endpoint.
 class ShopifyCustomerAccountTokens {
   /// Seconds before [expiresAt] at which the token counts as expiring.
@@ -26,19 +28,37 @@ class ShopifyCustomerAccountTokens {
   });
 
   /// Builds tokens from the token endpoint JSON body.
+  ///
+  /// `expires_in` may be a [num] or a numeric [String]; when it is missing
+  /// or unparseable it defaults to `0`, which makes the resulting token
+  /// immediately "expiring soon" (fail-safe) rather than silently long-lived.
+  ///
+  /// Throws a [ShopifyCustomerAccountException] with
+  /// [ShopifyCustomerAccountFailure.exchangeFailed] when `access_token` is
+  /// missing, empty, or not a [String].
   factory ShopifyCustomerAccountTokens.fromTokenResponse(
     Map<String, dynamic> body, {
     DateTime? now,
     ShopifyCustomerAccountTokens? previous,
   }) {
-    final expiresIn = (body['expires_in'] as num?)?.toInt() ?? 0;
+    final rawExpiresIn = body['expires_in'];
+    final expiresIn = rawExpiresIn is num
+        ? rawExpiresIn.toInt()
+        : int.tryParse('$rawExpiresIn') ?? 0;
+    final accessToken = body['access_token'];
+    if (accessToken is! String || accessToken.isEmpty) {
+      throw const ShopifyCustomerAccountException(
+        ShopifyCustomerAccountFailure.exchangeFailed,
+        'Token response had no access_token',
+      );
+    }
     return ShopifyCustomerAccountTokens(
-      accessToken: body['access_token'] as String,
+      accessToken: accessToken,
       refreshToken:
           (body['refresh_token'] as String?) ?? previous?.refreshToken,
       idToken: (body['id_token'] as String?) ?? previous?.idToken,
-      expiresAt: (now ?? DateTime.now().toUtc())
-          .add(Duration(seconds: expiresIn)),
+      expiresAt:
+          (now ?? DateTime.now().toUtc()).add(Duration(seconds: expiresIn)),
     );
   }
 
@@ -81,8 +101,13 @@ class ShopifyCustomerAccountTokens {
       other.accessToken == accessToken &&
       other.refreshToken == refreshToken &&
       other.idToken == idToken &&
-      other.expiresAt == expiresAt;
+      other.expiresAt.toUtc() == expiresAt.toUtc();
 
   @override
-  int get hashCode => Object.hash(accessToken, refreshToken, idToken, expiresAt);
+  int get hashCode => Object.hash(
+        accessToken,
+        refreshToken,
+        idToken,
+        expiresAt.toUtc().microsecondsSinceEpoch,
+      );
 }

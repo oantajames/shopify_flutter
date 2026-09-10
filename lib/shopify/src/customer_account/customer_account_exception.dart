@@ -39,5 +39,6 @@ class ShopifyCustomerAccountException implements Exception {
       reason == ShopifyCustomerAccountFailure.timeout;
 
   @override
-  String toString() => 'ShopifyCustomerAccountException(${reason.name}): $message';
+  String toString() =>
+      'ShopifyCustomerAccountException(${reason.name}): $message';
 }

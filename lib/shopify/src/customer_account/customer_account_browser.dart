@@ -1,7 +1,9 @@
+import 'customer_account_exception.dart';
+
 /// Opens Shopify's hosted pages and reports the redirect back.
 ///
 /// Implemented by the app (apps_core) so this package stays free of
-/// platform plugins.
+/// browser/webview plugins.
 abstract class ShopifyCustomerAccountBrowser {
   /// Opens [url]; completes with the callback URI matching [redirectUri].
   /// Throws [ShopifyCustomerAccountException] with `cancelled` or `timeout`.

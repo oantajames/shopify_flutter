@@ -338,6 +338,72 @@ void main() {
     expect((await store.read(config.storageKey))!.accessToken, 'fresh');
   });
 
+  test('a stale refresh completing does not drop the next session\'s refresh',
+      () async {
+    await store.write(
+        config.storageKey,
+        _tokens('old',
+            refreshToken: 'rt1', expiresIn: const Duration(seconds: 30)));
+    final staleStarted = Completer<void>();
+    final staleGate = Completer<void>();
+    final freshStarted = Completer<void>();
+    final freshGate = Completer<void>();
+    var refreshCalls = 0;
+    final auth = build((request) async {
+      final body = Uri.splitQueryString(request.body);
+      if (body['grant_type'] != 'refresh_token') {
+        return http.Response(
+            jsonEncode({
+              'access_token': 'fresh',
+              'refresh_token': 'rt2',
+              'expires_in': 30,
+            }),
+            200);
+      }
+      refreshCalls++;
+      if (refreshCalls == 1) {
+        staleStarted.complete();
+        await staleGate.future;
+        return http.Response(
+            jsonEncode({'access_token': 'stale', 'expires_in': 7200}), 200);
+      }
+      if (!freshStarted.isCompleted) freshStarted.complete();
+      await freshGate.future;
+      return http.Response(
+          jsonEncode({'access_token': 'refreshed', 'expires_in': 7200}), 200);
+    });
+    browser.onAuthorize = (url, _) => Uri.parse(
+        'shop.12345.app://callback?code=the-code&state=${url.queryParameters['state']}');
+
+    final stale = auth.accessToken;
+    await staleStarted.future;
+    await auth.signOut();
+    await auth.signIn();
+
+    // The new session's refresh is in flight when the stale one completes.
+    final first = auth.accessToken;
+    await freshStarted.future;
+    staleGate.complete();
+    expect(await stale, isNull);
+
+    final second = auth.accessToken;
+    freshGate.complete();
+
+    expect(await first, 'refreshed');
+    expect(await second, 'refreshed');
+    expect(refreshCalls, 2);
+  });
+
+  test('a 200 that is not json on refresh keeps the session', () async {
+    final stored = _tokens('old',
+        refreshToken: 'rt1', expiresIn: const Duration(seconds: 30));
+    await store.write(config.storageKey, stored);
+    final auth = build((_) async => http.Response('<html>', 200));
+
+    expect(await auth.accessToken, 'old');
+    expect(await store.read(config.storageKey), stored);
+  });
+
   test('a transport failure keeps a still-valid session', () async {
     final stored = _tokens('old',
         refreshToken: 'rt1', expiresIn: const Duration(seconds: 30));

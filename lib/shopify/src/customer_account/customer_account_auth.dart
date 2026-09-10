@@ -77,6 +77,11 @@ class ShopifyCustomerAccountAuth {
   /// Only one sign in may be in flight: a second call while one is pending
   /// fails immediately with [ShopifyCustomerAccountFailure.exchangeFailed]
   /// rather than opening a second browser session.
+  ///
+  /// Throws with [ShopifyCustomerAccountFailure.network] when the token
+  /// request never reached a verdict (a transport error, a 5xx, or a 2xx that
+  /// wasn't JSON), so callers can offer a retry instead of reporting a
+  /// rejected login.
   Future<ShopifyCustomerAccountTokens> signIn({
     String? loginHint,
     String? locale,
@@ -178,8 +183,15 @@ class ShopifyCustomerAccountAuth {
 
   Future<ShopifyCustomerAccountTokens?> _refreshOnce(
       ShopifyCustomerAccountTokens tokens) {
-    return _refreshing ??=
-        _doRefresh(tokens).whenComplete(() => _refreshing = null);
+    final inFlight = _refreshing;
+    if (inFlight != null) return inFlight;
+    // A refresh started under an older session can complete long after
+    // [signOut] dropped it, so it may only clear the slot it still owns.
+    late final Future<ShopifyCustomerAccountTokens?> started;
+    started = _doRefresh(tokens).whenComplete(() {
+      if (identical(_refreshing, started)) _refreshing = null;
+    });
+    return _refreshing = started;
   }
 
   Future<ShopifyCustomerAccountTokens?> _doRefresh(
@@ -288,8 +300,12 @@ class ShopifyCustomerAccountAuth {
     try {
       json = jsonDecode(response.body) as Map<String, dynamic>;
     } catch (_) {
-      throw ShopifyCustomerAccountException(
-          failure, 'Token endpoint returned invalid JSON');
+      // A 2xx that isn't JSON is a broken hop (a proxy or captive portal),
+      // not a verdict on the grant, so the session is kept for a retry.
+      throw const ShopifyCustomerAccountException(
+        ShopifyCustomerAccountFailure.network,
+        'Token endpoint returned invalid JSON',
+      );
     }
     try {
       return ShopifyCustomerAccountTokens.fromTokenResponse(json,

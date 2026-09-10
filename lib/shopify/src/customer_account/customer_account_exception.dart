@@ -22,6 +22,10 @@ enum ShopifyCustomerAccountFailure {
   /// The Customer Account API has not been configured for this shop.
   notConfigured,
 
+  /// There is no stored session, so the call was never attempted: the shopper
+  /// has to sign in first.
+  notSignedIn,
+
   /// The Customer Account API returned an error response.
   apiError,
 }

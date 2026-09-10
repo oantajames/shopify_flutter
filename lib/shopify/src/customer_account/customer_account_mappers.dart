@@ -68,7 +68,7 @@ class CustomerAccountMappers {
           'amount': (m?['amount'] ?? '0').toString(),
           'currencyCode': m?['currencyCode'] ?? node['currencyCode'] ?? '',
         };
-    Map<String, dynamic>? shippingAddress(dynamic a) {
+    Map<String, dynamic>? addressJson(dynamic a) {
       if (a == null) return null;
       final m = a as Map<String, dynamic>;
       return {
@@ -93,10 +93,21 @@ class CustomerAccountMappers {
     final lineItems = ((node['lineItems']?['edges'] as List?) ?? []).map((e) {
       final li = (e as Map)['node'] as Map<String, dynamic>;
       final quantity = (li['quantity'] as num?)?.toInt() ?? 0;
-      final unit = double.tryParse(money(li['price'])['amount'] as String) ?? 0;
-      final total = money(li['totalPrice']);
+      final price = money(li['price']);
+      final unit = double.tryParse(price['amount'] as String) ?? 0;
+      final currency = price['currencyCode'];
+      final original = unit * quantity;
       final discount = li['totalDiscount'];
-      final currency = money(li['price'])['currencyCode'];
+      final discounted = discount == null
+          // Without a discount Shopify's own total is the better source.
+          ? money(li['totalPrice'])
+          : {
+              'amount': (original -
+                      (double.tryParse(money(discount)['amount'] as String) ??
+                          0))
+                  .toString(),
+              'currencyCode': currency,
+            };
       final image = li['image'];
       return {
         'node': {
@@ -104,10 +115,10 @@ class CustomerAccountMappers {
           'quantity': quantity,
           'title': li['title'] ?? '',
           'originalTotalPrice': {
-            'amount': (unit * quantity).toString(),
+            'amount': original.toString(),
             'currencyCode': currency,
           },
-          'discountedTotalPrice': total,
+          'discountedTotalPrice': discounted,
           'discountAllocations': [
             if (discount != null &&
                 (double.tryParse(discount['amount'].toString()) ?? 0) > 0)
@@ -119,7 +130,7 @@ class CustomerAccountMappers {
             'availableForSale': true,
             'requiresShipping': li['requiresShipping'] ?? true,
             'sku': li['sku'],
-            'priceV2': money(li['price']),
+            'priceV2': price,
             if (image != null)
               'image': {
                 'originalSrc': image['url'],
@@ -159,8 +170,8 @@ class CustomerAccountMappers {
         'processedAt': node['processedAt'] ?? '',
         'financialStatus': node['financialStatus'] ?? '',
         'fulfillmentStatus': node['fulfillmentStatus'] ?? '',
-        'shippingAddress': shippingAddress(node['shippingAddress']),
-        'billingAddress': shippingAddress(node['billingAddress']),
+        'shippingAddress': addressJson(node['shippingAddress']),
+        'billingAddress': addressJson(node['billingAddress']),
         'statusUrl': node['statusPageUrl'] ?? '',
         'subtotalPriceV2': money(node['subtotal']),
         'totalPriceV2': money(node['totalPrice']),

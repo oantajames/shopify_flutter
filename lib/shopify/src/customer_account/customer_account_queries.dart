@@ -28,7 +28,6 @@ class CustomerAccountQueries {
         firstName
         lastName
         displayName
-        imageUrl
         creationDate
         tags
         emailAddress { emailAddress }
@@ -80,6 +79,10 @@ class CustomerAccountQueries {
   ''';
 
   /// One page of the customer's orders, newest first.
+  ///
+  /// Each order carries up to 50 line items and 10 fulfillments, so a page
+  /// is expensive: keep `first` small (25 or less) to stay inside the
+  /// Customer Account API's query cost budget.
   static const String orders = '''
     query AppsOrders(\$first: Int!, \$after: String) {
       customer {
@@ -110,7 +113,7 @@ class CustomerAccountQueries {
               fulfillments(first: 10) {
                 edges { node { status trackingInformation { number url company } } }
               }
-              lineItems(first: 100) {
+              lineItems(first: 50) {
                 edges {
                   node {
                     id
@@ -123,7 +126,6 @@ class CustomerAccountQueries {
                     requiresShipping
                     sku
                     variantId
-                    productId
                     image { url altText }
                   }
                 }

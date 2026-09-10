@@ -10,6 +10,25 @@ import 'customer_account_exception.dart';
 import 'customer_account_mappers.dart';
 import 'customer_account_queries.dart';
 
+/// One page of orders plus the cursor needed to ask for the next one.
+class CustomerAccountOrdersPage {
+  /// The orders in this page, newest first.
+  final List<Order> orders;
+
+  /// Cursor of the last edge, to pass back as `after`. Null on an empty page.
+  final String? endCursor;
+
+  /// Whether Shopify reported another page after this one.
+  final bool hasNextPage;
+
+  /// Creates a page of orders.
+  const CustomerAccountOrdersPage({
+    required this.orders,
+    this.endCursor,
+    this.hasNextPage = false,
+  });
+}
+
 /// Customer Account API GraphQL client (profile, addresses, orders).
 class ShopifyCustomerAccountApi {
   /// Supplies the access token every request is signed with.
@@ -59,20 +78,20 @@ class ShopifyCustomerAccountApi {
       'defaultAddress': isDefault,
     });
     _throwUserErrors(data, 'customerAddressCreate');
-    return CustomerAccountMappers.address(data['customerAddressCreate']
-        ['customerAddress'] as Map<String, dynamic>);
+    return _addressFrom(data, 'customerAddressCreate');
   }
 
-  /// Edits the address identified by `address.id`.
+  /// Edits the address identified by `address.id`, which must not be null.
   Future<Address> updateAddress(Address address, {bool? isDefault}) async {
+    final addressId = address.id;
+    if (addressId == null) throw ArgumentError.notNull('address.id');
     final data = await _run(CustomerAccountQueries.addressUpdate, variables: {
-      'addressId': address.id,
+      'addressId': addressId,
       'address': CustomerAccountMappers.addressInput(address),
       if (isDefault != null) 'defaultAddress': isDefault,
     });
     _throwUserErrors(data, 'customerAddressUpdate');
-    return CustomerAccountMappers.address(data['customerAddressUpdate']
-        ['customerAddress'] as Map<String, dynamic>);
+    return _addressFrom(data, 'customerAddressUpdate');
   }
 
   /// Removes the address with [addressId] from the address book.
@@ -91,21 +110,39 @@ class ShopifyCustomerAccountApi {
     _throwUserErrors(data, 'customerAddressUpdate');
   }
 
-  /// All orders, newest first, following pagination.
-  Future<List<Order>> getOrders({int pageSize = 50, int maxPages = 10}) async {
+  /// One page of orders, newest first. Pass the previous page's
+  /// [CustomerAccountOrdersPage.endCursor] as [after] to continue.
+  Future<CustomerAccountOrdersPage> getOrdersPage({
+    int first = 25,
+    String? after,
+  }) async {
+    final data = await _run(CustomerAccountQueries.orders,
+        variables: {'first': first, 'after': after});
+    final connection = data['customer']?['orders'] as Map<String, dynamic>?;
+    if (connection == null) {
+      return const CustomerAccountOrdersPage(orders: []);
+    }
+    final orders = [
+      for (final edge in (connection['edges'] as List? ?? []))
+        CustomerAccountMappers.order(edge as Map<String, dynamic>),
+    ];
+    final pageInfo = connection['pageInfo'] as Map<String, dynamic>?;
+    return CustomerAccountOrdersPage(
+      orders: orders,
+      endCursor: pageInfo?['endCursor'] as String?,
+      hasNextPage: pageInfo?['hasNextPage'] == true,
+    );
+  }
+
+  /// Orders, newest first, following pagination for at most [maxPages] pages.
+  Future<List<Order>> getOrders({int pageSize = 25, int maxPages = 10}) async {
     final orders = <Order>[];
     String? after;
     for (var page = 0; page < maxPages; page++) {
-      final data = await _run(CustomerAccountQueries.orders,
-          variables: {'first': pageSize, 'after': after});
-      final connection = data['customer']?['orders'] as Map<String, dynamic>?;
-      if (connection == null) break;
-      for (final edge in (connection['edges'] as List? ?? [])) {
-        orders.add(CustomerAccountMappers.order(edge as Map<String, dynamic>));
-      }
-      final pageInfo = connection['pageInfo'] as Map<String, dynamic>?;
-      if (pageInfo?['hasNextPage'] != true) break;
-      after = pageInfo?['endCursor'] as String?;
+      final result = await getOrdersPage(first: pageSize, after: after);
+      orders.addAll(result.orders);
+      if (!result.hasNextPage) break;
+      after = result.endCursor;
       if (after == null) break;
     }
     return orders;
@@ -116,11 +153,60 @@ class ShopifyCustomerAccountApi {
     final token = await auth.accessToken;
     if (token == null) {
       throw const ShopifyCustomerAccountException(
-          ShopifyCustomerAccountFailure.apiError, 'Not signed in');
+          ShopifyCustomerAccountFailure.notSignedIn, 'Not signed in');
     }
-    final http.Response response;
+    var response = await _post(document, variables, token);
+    if (response.statusCode == 401) {
+      // The token may simply have been revoked early; one refresh and one
+      // retry, then the rejection is reported.
+      final refreshed = (await auth.refresh())?.accessToken;
+      if (refreshed != null) {
+        response = await _post(document, variables, refreshed);
+      }
+      if (response.statusCode == 401) {
+        throw const ShopifyCustomerAccountException(
+            ShopifyCustomerAccountFailure.apiError,
+            'Customer Account API rejected the token');
+      }
+    }
+    if (response.statusCode >= 500) {
+      throw ShopifyCustomerAccountException(
+          ShopifyCustomerAccountFailure.network,
+          'Customer Account API returned ${response.statusCode}: '
+          '${response.body}');
+    }
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw ShopifyCustomerAccountException(
+          ShopifyCustomerAccountFailure.apiError,
+          'Customer Account API returned ${response.statusCode}: '
+          '${response.body}');
+    }
+    final Object? decoded;
     try {
-      response = await _client.post(
+      decoded = jsonDecode(response.body);
+    } catch (_) {
+      throw const ShopifyCustomerAccountException(
+          ShopifyCustomerAccountFailure.network,
+          'Customer Account API returned invalid JSON');
+    }
+    if (decoded is! Map<String, dynamic>) {
+      throw const ShopifyCustomerAccountException(
+          ShopifyCustomerAccountFailure.network,
+          'Customer Account API returned a non-object body');
+    }
+    final errors = decoded['errors'] as List?;
+    if (errors != null && errors.isNotEmpty) {
+      throw ShopifyCustomerAccountException(
+          ShopifyCustomerAccountFailure.apiError,
+          errors.map((e) => (e as Map)['message']).join(', '));
+    }
+    return (decoded['data'] as Map<String, dynamic>?) ?? {};
+  }
+
+  Future<http.Response> _post(
+      String document, Map<String, dynamic>? variables, String token) async {
+    try {
+      return await _client.post(
         endpoints.graphql,
         headers: {
           'Content-Type': 'application/json',
@@ -130,23 +216,20 @@ class ShopifyCustomerAccountApi {
         body: jsonEncode({'query': document, 'variables': variables ?? {}}),
       );
     } catch (e) {
+      // No verdict from Shopify, so the session is kept and the call can be
+      // retried later.
       throw ShopifyCustomerAccountException(
-          ShopifyCustomerAccountFailure.apiError, 'Request failed: $e');
+          ShopifyCustomerAccountFailure.network, 'Request failed: $e');
     }
-    if (response.statusCode < 200 || response.statusCode >= 300) {
+  }
+
+  Address _addressFrom(Map<String, dynamic> data, String key) {
+    final address = (data[key] as Map<String, dynamic>?)?['customerAddress'];
+    if (address is! Map<String, dynamic>) {
       throw ShopifyCustomerAccountException(
-          ShopifyCustomerAccountFailure.apiError,
-          'Customer Account API returned ${response.statusCode}: '
-          '${response.body}');
+          ShopifyCustomerAccountFailure.apiError, '$key returned no address');
     }
-    final body = jsonDecode(response.body) as Map<String, dynamic>;
-    final errors = body['errors'] as List?;
-    if (errors != null && errors.isNotEmpty) {
-      throw ShopifyCustomerAccountException(
-          ShopifyCustomerAccountFailure.apiError,
-          errors.map((e) => (e as Map)['message']).join(', '));
-    }
-    return (body['data'] as Map<String, dynamic>?) ?? {};
+    return CustomerAccountMappers.address(address);
   }
 
   void _throwUserErrors(Map<String, dynamic> data, String key) {

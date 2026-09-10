@@ -184,4 +184,46 @@ void main() {
     expect(order.successfulFulfillments!.single.trackingInfo!.single.number,
         'TRK1');
   });
+
+  test('maps a sparse order node without throwing', () {
+    final order = CustomerAccountMappers.order({
+      'node': {'id': 'gid://shopify/Order/2'}
+    });
+    expect(order.id, 'gid://shopify/Order/2');
+    expect(order.orderNumber, 0);
+    expect(order.totalPriceV2.amount, 0);
+    expect(order.subtotalPriceV2.amount, 0);
+    expect(order.totalShippingPriceV2.amount, 0);
+    expect(order.totalTaxV2.amount, 0);
+    expect(order.lineItems.lineItemOrderList, isEmpty);
+    expect(order.successfulFulfillments, isEmpty);
+    expect(order.shippingAddress, isNull);
+    expect(order.cursor, isNull);
+  });
+
+  test('a line item without a discount keeps the reported total', () {
+    final order = CustomerAccountMappers.order({
+      'node': {
+        'id': 'gid://shopify/Order/3',
+        'currencyCode': 'RON',
+        'lineItems': {
+          'edges': [
+            {
+              'node': {
+                'id': 'gid://shopify/LineItem/1',
+                'title': 'Coffee',
+                'quantity': 2,
+                'price': {'amount': '50.0', 'currencyCode': 'RON'},
+                'totalPrice': {'amount': '95.0', 'currencyCode': 'RON'},
+              }
+            }
+          ]
+        },
+      }
+    });
+    final line = order.lineItems.lineItemOrderList.single;
+    expect(line.originalTotalPrice.amount, 100.0);
+    expect(line.discountedTotalPrice.amount, 95.0);
+    expect(line.discountAllocations, isEmpty);
+  });
 }

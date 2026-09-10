@@ -30,6 +30,8 @@ dependencies:
   shared_preferences: ^2.0.20
   intl: ">=0.19.0 <0.21.2"
   url_launcher: ^6.1.10
+  http: ^1.1.0
+  crypto: ^3.0.3
 
 dev_dependencies:
   flutter_test:

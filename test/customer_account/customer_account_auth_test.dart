@@ -249,6 +249,31 @@ void main() {
     expect(await store.read(webConfig.storageKey), isNull);
   });
 
+  test('signIn rethrows browserUnavailable unchanged and stays usable',
+      () async {
+    var tokenCalls = 0;
+    final auth = build((_) async {
+      tokenCalls++;
+      return http.Response(
+          jsonEncode({'access_token': 'at1', 'expires_in': 7200}), 200);
+    });
+    const unavailable = ShopifyCustomerAccountException(
+        ShopifyCustomerAccountFailure.browserUnavailable, 'popup blocked');
+    browser.onAuthorize = (_, __) => throw unavailable;
+
+    await expectLater(auth.signIn(), throwsA(same(unavailable)));
+    expect(tokenCalls, 0);
+    expect(await store.read(config.storageKey), isNull);
+    expect(await auth.isSignedIn, isFalse);
+
+    // The failed attempt released the sign-in guard.
+    browser.onAuthorize = (url, _) => Uri.parse(
+        'shop.12345.app://callback?code=c&state=${url.queryParameters['state']}');
+    final tokens = await auth.signIn();
+    expect(tokens.accessToken, 'at1');
+    expect(tokenCalls, 1);
+  });
+
   test('signIn sends the verifier that matches the authorize challenge',
       () async {
     late String verifier;

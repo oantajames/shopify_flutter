@@ -6,6 +6,10 @@ enum ShopifyCustomerAccountFailure {
   /// The flow did not complete before its timeout elapsed.
   timeout,
 
+  /// The host could not open the hosted page: popup blocked, no browser,
+  /// launch refused. Not a shopper cancellation.
+  browserUnavailable,
+
   /// The `state` returned by Shopify didn't match the one that was sent.
   stateMismatch,
 
@@ -42,6 +46,8 @@ class ShopifyCustomerAccountException implements Exception {
   const ShopifyCustomerAccountException(this.reason, this.message);
 
   /// Whether this exception represents a user cancellation or a timeout.
+  /// A [ShopifyCustomerAccountFailure.browserUnavailable] is neither: the
+  /// shopper never saw the page, so the UI should say why.
   bool get isCancelled =>
       reason == ShopifyCustomerAccountFailure.cancelled ||
       reason == ShopifyCustomerAccountFailure.timeout;

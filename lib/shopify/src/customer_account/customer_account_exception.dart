@@ -48,9 +48,23 @@ class ShopifyCustomerAccountException implements Exception {
   /// Whether this exception represents a user cancellation or a timeout.
   /// A [ShopifyCustomerAccountFailure.browserUnavailable] is neither: the
   /// shopper never saw the page, so the UI should say why.
-  bool get isCancelled =>
-      reason == ShopifyCustomerAccountFailure.cancelled ||
-      reason == ShopifyCustomerAccountFailure.timeout;
+  ///
+  /// Exhaustive on purpose: a new failure must be classified here or it does
+  /// not compile, rather than silently reading as "not cancelled".
+  bool get isCancelled => switch (reason) {
+        ShopifyCustomerAccountFailure.cancelled ||
+        ShopifyCustomerAccountFailure.timeout =>
+          true,
+        ShopifyCustomerAccountFailure.browserUnavailable ||
+        ShopifyCustomerAccountFailure.stateMismatch ||
+        ShopifyCustomerAccountFailure.exchangeFailed ||
+        ShopifyCustomerAccountFailure.refreshFailed ||
+        ShopifyCustomerAccountFailure.network ||
+        ShopifyCustomerAccountFailure.notConfigured ||
+        ShopifyCustomerAccountFailure.notSignedIn ||
+        ShopifyCustomerAccountFailure.apiError =>
+          false,
+      };
 
   @override
   String toString() =>

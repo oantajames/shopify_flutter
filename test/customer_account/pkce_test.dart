@@ -14,6 +14,7 @@ void main() {
     expect(RegExp(r'^[A-Za-z0-9\-._~]+$').hasMatch(pkce.verifier), isTrue);
     expect(pkce.challenge, Pkce.challengeFor(pkce.verifier));
     expect(pkce.challenge.contains('='), isFalse);
+    expect(Pkce.generate().verifier, isNot(Pkce.generate().verifier));
   });
 
   test('state and nonce are url-safe and unique', () {

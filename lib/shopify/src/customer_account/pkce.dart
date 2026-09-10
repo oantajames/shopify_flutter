@@ -19,12 +19,13 @@ class Pkce {
   static const String _charset =
       'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~';
 
+  static final Random _random = Random.secure();
+
   /// Generates a fresh 128-character verifier and its challenge.
   static Pkce generate() {
-    final random = Random.secure();
     final verifier = List.generate(
       128,
-      (_) => _charset[random.nextInt(_charset.length)],
+      (_) => _charset[_random.nextInt(_charset.length)],
     ).join();
     return Pkce._(verifier, challengeFor(verifier));
   }
@@ -36,8 +37,7 @@ class Pkce {
 
   /// URL-safe random token for `state` / `nonce`.
   static String randomToken([int bytes = 32]) {
-    final random = Random.secure();
-    final data = List<int>.generate(bytes, (_) => random.nextInt(256));
+    final data = List<int>.generate(bytes, (_) => _random.nextInt(256));
     return base64Url.encode(data).replaceAll('=', '');
   }
 }

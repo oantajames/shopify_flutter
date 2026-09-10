@@ -15,6 +15,10 @@ enum ShopifyCustomerAccountFailure {
   /// The refresh token could not be exchanged for new tokens.
   refreshFailed,
 
+  /// The request never reached a verdict: a transport error or a 5xx response.
+  /// The stored session is kept so the call can be retried later.
+  network,
+
   /// The Customer Account API has not been configured for this shop.
   notConfigured,
 

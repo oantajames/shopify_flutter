@@ -1,4 +1,6 @@
+import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:http/http.dart' as http;
@@ -10,6 +12,7 @@ import 'package:shopify_flutter/shopify/src/customer_account/customer_account_en
 import 'package:shopify_flutter/shopify/src/customer_account/customer_account_exception.dart';
 import 'package:shopify_flutter/shopify/src/customer_account/customer_account_token_store.dart';
 import 'package:shopify_flutter/shopify/src/customer_account/customer_account_tokens.dart';
+import 'package:shopify_flutter/shopify/src/customer_account/pkce.dart';
 
 class _FakeBrowser implements ShopifyCustomerAccountBrowser {
   Uri? lastAuthorizeUrl;
@@ -192,4 +195,190 @@ void main() {
     expect(browser.lastLogoutUrl!.queryParameters['post_logout_redirect_uri'],
         'shop.12345.app://logout');
   });
+
+  test('signIn sends the verifier that matches the authorize challenge',
+      () async {
+    late String verifier;
+    final auth = build((request) async {
+      verifier = Uri.splitQueryString(request.body)['code_verifier']!;
+      return http.Response(
+          jsonEncode({'access_token': 'at1', 'expires_in': 7200}), 200);
+    });
+    browser.onAuthorize = (url, _) => Uri.parse(
+        'shop.12345.app://callback?code=the-code&state=${url.queryParameters['state']}');
+
+    await auth.signIn();
+
+    expect(Pkce.challengeFor(verifier),
+        browser.lastAuthorizeUrl!.queryParameters['code_challenge']);
+  });
+
+  test('a second signIn while one is pending is rejected', () async {
+    final gate = Completer<void>();
+    final auth = build((_) async {
+      await gate.future;
+      return http.Response(
+          jsonEncode({'access_token': 'at1', 'expires_in': 7200}), 200);
+    });
+    browser.onAuthorize = (url, _) => Uri.parse(
+        'shop.12345.app://callback?code=the-code&state=${url.queryParameters['state']}');
+
+    final first = auth.signIn();
+    await expectLater(
+      auth.signIn(),
+      throwsA(isA<ShopifyCustomerAccountException>().having(
+          (e) => e.message, 'message', contains('already in progress'))),
+    );
+    gate.complete();
+
+    expect((await first).accessToken, 'at1');
+    expect(requests, hasLength(1));
+  });
+
+  test(
+      'signIn reports a state mismatch even when the callback carries an error',
+      () async {
+    final auth = build((_) async => fail('token endpoint must not be called'));
+    browser.onAuthorize = (_, __) =>
+        Uri.parse('shop.12345.app://callback?error=access_denied&state=wrong');
+    await expectLater(
+      auth.signIn(),
+      throwsA(isA<ShopifyCustomerAccountException>().having((e) => e.reason,
+          'reason', ShopifyCustomerAccountFailure.stateMismatch)),
+    );
+  });
+
+  test('concurrent accessToken reads share a single refresh', () async {
+    await store.write(
+        config.storageKey,
+        _tokens('old',
+            refreshToken: 'rt1', expiresIn: const Duration(seconds: 30)));
+    final auth = build((_) async => http.Response(
+        jsonEncode({'access_token': 'new', 'expires_in': 7200}), 200));
+
+    final results = await Future.wait(
+        [auth.accessToken, auth.accessToken, auth.accessToken]);
+
+    expect(results, ['new', 'new', 'new']);
+    expect(requests, hasLength(1));
+  });
+
+  test('signOut during an in-flight refresh keeps the session cleared',
+      () async {
+    await store.write(
+        config.storageKey,
+        _tokens('old',
+            refreshToken: 'rt1', expiresIn: const Duration(seconds: 30)));
+    final started = Completer<void>();
+    final gate = Completer<void>();
+    final auth = build((_) async {
+      started.complete();
+      await gate.future;
+      return http.Response(
+          jsonEncode({'access_token': 'new', 'expires_in': 7200}), 200);
+    });
+
+    final pending = auth.accessToken;
+    await started.future;
+    await auth.signOut();
+    gate.complete();
+
+    expect(await pending, isNull);
+    expect(await store.read(config.storageKey), isNull);
+  });
+
+  test('signOut requested before a refresh starts still wins', () async {
+    await store.write(
+        config.storageKey,
+        _tokens('old',
+            refreshToken: 'rt1', expiresIn: const Duration(seconds: 30)));
+    final gate = Completer<void>();
+    final auth = build((_) async {
+      await gate.future;
+      return http.Response(
+          jsonEncode({'access_token': 'new', 'expires_in': 7200}), 200);
+    });
+
+    final pending = auth.accessToken;
+    await auth.signOut();
+    gate.complete();
+
+    expect(await pending, isNull);
+    expect(await store.read(config.storageKey), isNull);
+  });
+
+  test('a refresh that outlives a sign out never overwrites the next session',
+      () async {
+    await store.write(
+        config.storageKey,
+        _tokens('old',
+            refreshToken: 'rt1', expiresIn: const Duration(seconds: 30)));
+    final refreshStarted = Completer<void>();
+    final gate = Completer<void>();
+    final auth = build((request) async {
+      if (Uri.splitQueryString(request.body)['grant_type'] == 'refresh_token') {
+        refreshStarted.complete();
+        await gate.future;
+        return http.Response(
+            jsonEncode({'access_token': 'stale', 'expires_in': 7200}), 200);
+      }
+      return http.Response(
+          jsonEncode({'access_token': 'fresh', 'expires_in': 7200}), 200);
+    });
+    browser.onAuthorize = (url, _) => Uri.parse(
+        'shop.12345.app://callback?code=the-code&state=${url.queryParameters['state']}');
+
+    final pending = auth.accessToken;
+    await refreshStarted.future;
+    await auth.signOut();
+    await auth.signIn();
+    gate.complete();
+
+    expect(await pending, isNull);
+    expect((await store.read(config.storageKey))!.accessToken, 'fresh');
+  });
+
+  test('a transport failure keeps a still-valid session', () async {
+    final stored = _tokens('old',
+        refreshToken: 'rt1', expiresIn: const Duration(seconds: 30));
+    await store.write(config.storageKey, stored);
+    final auth = build((_) async => throw const SocketException('offline'));
+
+    expect(await auth.accessToken, 'old');
+    expect(await store.read(config.storageKey), stored);
+  });
+
+  test('a transport failure on an expired session keeps the tokens for a retry',
+      () async {
+    final stored = _tokens('old',
+        refreshToken: 'rt1', expiresIn: const Duration(minutes: -1));
+    await store.write(config.storageKey, stored);
+    final auth = build((_) async => throw const SocketException('offline'));
+
+    expect(await auth.accessToken, isNull);
+    expect(await store.read(config.storageKey), stored);
+  });
+
+  test('a 5xx from the token endpoint keeps the session', () async {
+    final stored = _tokens('old',
+        refreshToken: 'rt1', expiresIn: const Duration(seconds: 30));
+    await store.write(config.storageKey, stored);
+    final auth = build((_) async => http.Response('upstream boom', 503));
+
+    expect(await auth.accessToken, 'old');
+    expect(await store.read(config.storageKey), stored);
+  });
 }
+
+ShopifyCustomerAccountTokens _tokens(
+  String accessToken, {
+  required Duration expiresIn,
+  String? refreshToken,
+  String? idToken,
+}) =>
+    ShopifyCustomerAccountTokens(
+      accessToken: accessToken,
+      refreshToken: refreshToken,
+      idToken: idToken,
+      expiresAt: DateTime.now().toUtc().add(expiresIn),
+    );

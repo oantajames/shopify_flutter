@@ -18,6 +18,9 @@ class ShopifyCustomerAccountAuth {
   /// Scope granting full Customer Account API access.
   static const String scope = 'openid email customer-account-api:full';
 
+  /// How much of an error body is quoted in exception messages.
+  static const int _bodyPreviewLength = 200;
+
   /// Shop domain, shop id, client id and the derived redirect URIs.
   final ShopifyCustomerAccountConfig config;
 
@@ -33,6 +36,11 @@ class ShopifyCustomerAccountAuth {
   final http.Client _client;
 
   Future<ShopifyCustomerAccountTokens?>? _refreshing;
+  Future<ShopifyCustomerAccountTokens>? _signingIn;
+
+  /// Bumped by [signOut]; a refresh started under an older generation must
+  /// never write its result back over a session the shopper has ended.
+  int _sessionGeneration = 0;
 
   /// Creates an auth client for one shop.
   ShopifyCustomerAccountAuth({
@@ -65,7 +73,27 @@ class ShopifyCustomerAccountAuth {
       });
 
   /// Runs the hosted login and stores the resulting tokens.
+  ///
+  /// Only one sign in may be in flight: a second call while one is pending
+  /// fails immediately with [ShopifyCustomerAccountFailure.exchangeFailed]
+  /// rather than opening a second browser session.
   Future<ShopifyCustomerAccountTokens> signIn({
+    String? loginHint,
+    String? locale,
+  }) async {
+    if (_signingIn != null) {
+      throw const ShopifyCustomerAccountException(
+        ShopifyCustomerAccountFailure.exchangeFailed,
+        'A sign in is already in progress',
+      );
+    }
+    final attempt = _doSignIn(loginHint: loginHint, locale: locale)
+        .whenComplete(() => _signingIn = null);
+    _signingIn = attempt;
+    return attempt;
+  }
+
+  Future<ShopifyCustomerAccountTokens> _doSignIn({
     String? loginHint,
     String? locale,
   }) async {
@@ -82,16 +110,18 @@ class ShopifyCustomerAccountAuth {
 
     final callback = await browser.authorize(url, config.redirectUri);
     final params = callback.queryParameters;
-    if (params['error'] != null) {
-      throw ShopifyCustomerAccountException(
-        ShopifyCustomerAccountFailure.exchangeFailed,
-        params['error_description'] ?? params['error']!,
-      );
-    }
+    // The state is checked first: a callback that isn't ours says nothing
+    // about this attempt, whatever else it carries.
     if (params['state'] != state) {
       throw const ShopifyCustomerAccountException(
         ShopifyCustomerAccountFailure.stateMismatch,
         'Authorization state did not match',
+      );
+    }
+    if (params['error'] != null) {
+      throw ShopifyCustomerAccountException(
+        ShopifyCustomerAccountFailure.exchangeFailed,
+        params['error_description'] ?? params['error']!,
       );
     }
     final code = params['code'];
@@ -115,6 +145,10 @@ class ShopifyCustomerAccountAuth {
 
   /// Current access token, refreshed when expiring. Null when signed out or
   /// when refresh is impossible (the stored session is cleared in that case).
+  ///
+  /// A transport error or 5xx keeps the session: the current token is returned
+  /// while it is still valid, and null (with the tokens kept for a later
+  /// retry) once it has expired.
   Future<String?> get accessToken async {
     final tokens = await tokenStore.read(config.storageKey);
     if (tokens == null) return null;
@@ -124,6 +158,11 @@ class ShopifyCustomerAccountAuth {
   }
 
   /// Stored tokens without refreshing (for id_token access etc).
+  ///
+  /// The `idToken` is **unverified**: this package checks neither its
+  /// signature nor the `nonce` it was issued with, so it must only be passed
+  /// back to Shopify as `id_token_hint` on logout. Never treat its claims as
+  /// proof of identity or use them for authorization.
   Future<ShopifyCustomerAccountTokens?> get storedTokens =>
       tokenStore.read(config.storageKey);
 
@@ -145,13 +184,18 @@ class ShopifyCustomerAccountAuth {
 
   Future<ShopifyCustomerAccountTokens?> _doRefresh(
       ShopifyCustomerAccountTokens tokens) async {
-    final refreshToken = tokens.refreshToken;
+    final generation = _sessionGeneration;
+    // Re-read: an earlier refresh may have rotated the refresh token, and
+    // replaying a rotated token invalidates the whole grant.
+    final current = await tokenStore.read(config.storageKey) ?? tokens;
+    final refreshToken = current.refreshToken;
     if (refreshToken == null || refreshToken.isEmpty) {
-      if (tokens.isExpired()) {
+      if (current.isExpired()) {
+        if (!_isCurrentSession(generation)) return null;
         await tokenStore.clear(config.storageKey);
         return null;
       }
-      return tokens;
+      return current;
     }
     try {
       final refreshed = await _postToken({
@@ -160,14 +204,25 @@ class ShopifyCustomerAccountAuth {
         'refresh_token': refreshToken,
       },
           failure: ShopifyCustomerAccountFailure.refreshFailed,
-          previous: tokens);
+          previous: current);
+      if (!_isCurrentSession(generation)) return null;
+      // The shopper may have signed out while the request was in flight.
+      if (await tokenStore.read(config.storageKey) == null) return null;
       await tokenStore.write(config.storageKey, refreshed);
       return refreshed;
-    } on ShopifyCustomerAccountException {
+    } on ShopifyCustomerAccountException catch (e) {
+      if (e.reason == ShopifyCustomerAccountFailure.network) {
+        // Shopify never rejected the grant, so the session is kept for a
+        // later retry.
+        return current.isExpired() ? null : current;
+      }
+      if (!_isCurrentSession(generation)) return null;
       await tokenStore.clear(config.storageKey);
       return null;
     }
   }
+
+  bool _isCurrentSession(int generation) => generation == _sessionGeneration;
 
   /// Aborts an in-progress [signIn] (the shopper tapped Cancel in the app).
   Future<void> cancelSignIn() => browser.cancelPending();
@@ -181,6 +236,8 @@ class ShopifyCustomerAccountAuth {
 
   /// Clears stored tokens, then ends the Shopify browser session best-effort.
   Future<void> signOut({bool endShopifySession = true}) async {
+    _sessionGeneration++;
+    _refreshing = null;
     final tokens = await tokenStore.read(config.storageKey);
     await tokenStore.clear(config.storageKey);
     if (!endShopifySession) return;
@@ -209,11 +266,23 @@ class ShopifyCustomerAccountAuth {
       );
     } catch (e) {
       throw ShopifyCustomerAccountException(
-          failure, 'Token request failed: $e');
+        ShopifyCustomerAccountFailure.network,
+        'Token request failed: $e',
+      );
+    }
+    if (response.statusCode >= 500) {
+      throw ShopifyCustomerAccountException(
+        ShopifyCustomerAccountFailure.network,
+        'Token endpoint returned ${response.statusCode}: '
+        '${_preview(response.body)}',
+      );
     }
     if (response.statusCode < 200 || response.statusCode >= 300) {
-      throw ShopifyCustomerAccountException(failure,
-          'Token endpoint returned ${response.statusCode}: ${response.body}');
+      throw ShopifyCustomerAccountException(
+        failure,
+        'Token endpoint returned ${response.statusCode}: '
+        '${_preview(response.body)}',
+      );
     }
     final Map<String, dynamic> json;
     try {
@@ -221,10 +290,6 @@ class ShopifyCustomerAccountAuth {
     } catch (_) {
       throw ShopifyCustomerAccountException(
           failure, 'Token endpoint returned invalid JSON');
-    }
-    if (json['access_token'] is! String) {
-      throw ShopifyCustomerAccountException(failure,
-          'Token endpoint response missing access_token: ${response.body}');
     }
     try {
       return ShopifyCustomerAccountTokens.fromTokenResponse(json,
@@ -235,4 +300,8 @@ class ShopifyCustomerAccountAuth {
       throw ShopifyCustomerAccountException(failure, e.message);
     }
   }
+
+  static String _preview(String body) => body.length <= _bodyPreviewLength
+      ? body
+      : '${body.substring(0, _bodyPreviewLength)}…';
 }

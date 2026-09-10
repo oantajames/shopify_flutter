@@ -23,13 +23,18 @@ class _FakeBrowser implements ShopifyCustomerAccountBrowser {
   Future<Uri> authorize(Uri url, Uri redirectUri,
       {Duration timeout = const Duration(minutes: 5)}) async {
     lastAuthorizeUrl = url;
+    lastAuthorizeRedirectUri = redirectUri;
     return onAuthorize!(url, redirectUri);
   }
+
+  Uri? lastAuthorizeRedirectUri;
+  Uri? lastLogoutRedirectUri;
 
   @override
   Future<void> logout(Uri url, Uri redirectUri,
       {Duration timeout = const Duration(seconds: 10)}) async {
     lastLogoutUrl = url;
+    lastLogoutRedirectUri = redirectUri;
   }
 
   @override
@@ -194,6 +199,54 @@ void main() {
     expect(browser.lastLogoutUrl!.queryParameters['id_token_hint'], 'idt');
     expect(browser.lastLogoutUrl!.queryParameters['post_logout_redirect_uri'],
         'shop.12345.app://logout');
+  });
+
+  test('signIn and signOut carry custom https redirects end to end', () async {
+    final redirect = Uri.parse('https://shop.example.com/auth/callback');
+    final logout = Uri.parse('https://shop.example.com/auth/logged-out');
+    final webConfig = ShopifyCustomerAccountConfig(
+      shopDomain: 'demo.myshopify.com',
+      shopId: '12345',
+      clientId: 'cid',
+      customRedirectUri: redirect,
+      customLogoutRedirectUri: logout,
+    );
+    final auth = ShopifyCustomerAccountAuth(
+      config: webConfig,
+      endpoints: ShopifyCustomerAccountEndpoints.defaults(webConfig),
+      browser: browser,
+      tokenStore: store,
+      client: MockClient((request) async {
+        requests.add(request);
+        return http.Response(
+            jsonEncode({
+              'access_token': 'at1',
+              'refresh_token': 'rt1',
+              'id_token': 'idt1',
+              'expires_in': 7200,
+            }),
+            200);
+      }),
+    );
+    browser.onAuthorize = (url, redirectUri) => redirect.replace(
+            queryParameters: {
+              'code': 'the-code',
+              'state': url.queryParameters['state']!
+            });
+
+    await auth.signIn();
+    expect(browser.lastAuthorizeUrl!.queryParameters['redirect_uri'],
+        redirect.toString());
+    expect(browser.lastAuthorizeRedirectUri, same(redirect));
+    expect(Uri.splitQueryString(requests.single.body)['redirect_uri'],
+        redirect.toString());
+    expect(await store.read(webConfig.storageKey), isNotNull);
+
+    await auth.signOut();
+    expect(browser.lastLogoutUrl!.queryParameters['post_logout_redirect_uri'],
+        logout.toString());
+    expect(browser.lastLogoutRedirectUri, same(logout));
+    expect(await store.read(webConfig.storageKey), isNull);
   });
 
   test('signIn sends the verifier that matches the authorize challenge',

@@ -21,7 +21,38 @@ void main() {
     });
 
     test('key storage by shop domain', () {
+      expect(config.customStorageKey, isNull);
       expect(config.storageKey, 'shopify_customer_account_demo.myshopify.com');
+    });
+  });
+
+  group('custom storage key', () {
+    const custom = ShopifyCustomerAccountConfig(
+      shopDomain: 'demo.myshopify.com',
+      shopId: '12345',
+      clientId: 'client-abc',
+      customStorageKey: 'shopify_customer_account_app_42',
+    );
+
+    test('is returned verbatim', () {
+      expect(custom.storageKey, 'shopify_customer_account_app_42');
+    });
+
+    test('namespaces two apps for the same shop', () {
+      const other = ShopifyCustomerAccountConfig(
+        shopDomain: 'demo.myshopify.com',
+        shopId: '12345',
+        clientId: 'client-xyz',
+        customStorageKey: 'shopify_customer_account_app_43',
+      );
+      expect(custom.storageKey, isNot(other.storageKey));
+      expect(custom.storageKey, isNot(config.storageKey));
+    });
+
+    test('leaves the redirects and scheme unchanged', () {
+      expect(custom.callbackScheme, 'shop.12345.app');
+      expect(custom.redirectUri, Uri.parse('shop.12345.app://callback'));
+      expect(custom.logoutRedirectUri, Uri.parse('shop.12345.app://logout'));
     });
   });
 

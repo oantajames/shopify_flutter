@@ -25,6 +25,11 @@ class ShopifyCustomerAccountConfig {
   /// channel exactly as given.
   final Uri? customLogoutRedirectUri;
 
+  /// Namespaces persisted tokens; hosts that run several apps for one shop in
+  /// one process must set it, or the apps share (and clear) each other's
+  /// session.
+  final String? customStorageKey;
+
   /// Creates a Customer Account API configuration.
   const ShopifyCustomerAccountConfig({
     required this.shopDomain,
@@ -33,6 +38,7 @@ class ShopifyCustomerAccountConfig {
     this.apiVersion = defaultApiVersion,
     this.customRedirectUri,
     this.customLogoutRedirectUri,
+    this.customStorageKey,
   });
 
   /// Custom scheme required by Shopify for mobile callbacks: `shop.{shopId}.*`.
@@ -48,6 +54,8 @@ class ShopifyCustomerAccountConfig {
   Uri get logoutRedirectUri =>
       customLogoutRedirectUri ?? Uri.parse('$callbackScheme://logout');
 
-  /// Storage key for persisted tokens.
-  String get storageKey => 'shopify_customer_account_$shopDomain';
+  /// Storage key for persisted tokens: [customStorageKey] when set, otherwise
+  /// one key per shop domain.
+  String get storageKey =>
+      customStorageKey ?? 'shopify_customer_account_$shopDomain';
 }

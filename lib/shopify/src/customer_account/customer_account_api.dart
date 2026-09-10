@@ -158,10 +158,19 @@ class ShopifyCustomerAccountApi {
     var response = await _post(document, variables, token);
     if (response.statusCode == 401) {
       // The token may simply have been revoked early; one refresh and one
-      // retry, then the rejection is reported.
-      final refreshed = (await auth.refresh())?.accessToken;
-      if (refreshed != null) {
-        response = await _post(document, variables, refreshed);
+      // retry, then the rejection is reported. A refresh that comes back
+      // with the same access token (no refresh token to use, or the grant
+      // just wasn't renewed) would only repeat the same rejected request, so
+      // the retry is skipped in that case.
+      final refreshedTokens = await auth.refresh();
+      if (refreshedTokens == null) {
+        throw const ShopifyCustomerAccountException(
+            ShopifyCustomerAccountFailure.notSignedIn,
+            'Session expired; sign in again');
+      }
+      if (refreshedTokens.accessToken != token) {
+        response =
+            await _post(document, variables, refreshedTokens.accessToken);
       }
       if (response.statusCode == 401) {
         throw const ShopifyCustomerAccountException(

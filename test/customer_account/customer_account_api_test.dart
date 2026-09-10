@@ -205,6 +205,42 @@ void main() {
     expect(requests.where((r) => r.url == endpoints.graphql), hasLength(2));
   });
 
+  test(
+      'a 401 with no refresh token makes exactly one graphql request and '
+      'throws apiError', () async {
+    // setUp stores a token with no refreshToken and a far expiry, so
+    // auth.refresh() has nothing to exchange and hands back the same token.
+    final api = buildRaw((request) async {
+      expect(request.url, isNot(endpoints.token));
+      return http.Response('{"errors":[{"message":"unauthorized"}]}', 401);
+    });
+    await expectLater(api.getCustomer(),
+        throwsFailure(ShopifyCustomerAccountFailure.apiError));
+    expect(requests.where((r) => r.url == endpoints.graphql), hasLength(1));
+  });
+
+  test(
+      'a 401 whose refresh is rejected throws notSignedIn and clears the '
+      'store', () async {
+    await store.write(
+      config.storageKey,
+      ShopifyCustomerAccountTokens(
+          accessToken: 'stale',
+          refreshToken: 'rt1',
+          expiresAt: DateTime.now().toUtc().add(const Duration(hours: 1))),
+    );
+    final api = buildRaw((request) async {
+      if (request.url == endpoints.token) {
+        return http.Response(jsonEncode({'error': 'invalid_grant'}), 400);
+      }
+      return http.Response('{"errors":[{"message":"unauthorized"}]}', 401);
+    });
+    await expectLater(api.getCustomer(),
+        throwsFailure(ShopifyCustomerAccountFailure.notSignedIn));
+    expect(await store.read(config.storageKey), isNull);
+    expect(requests.where((r) => r.url == endpoints.graphql), hasLength(1));
+  });
+
   test('userErrors become ShopifyException', () async {
     final api = build((op) => {
           'customerAddressCreate': {
